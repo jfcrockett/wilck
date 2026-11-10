@@ -16,4 +16,9 @@ assert(e.length === 1 && e[0].includes('dropped to 30 min (usually 60)'), 'great
 assert.deepEqual(run(ride('OPERATING', 30)), [], 'quiet when nothing changes');
 d.done.add('r');
 assert.deepEqual(run(ride('DOWN', null)), [], 'done rides stay quiet');
+// A planned show time wins over the next performance.
+const show2 = {...show, showtimes: [{type: 'Performance Time', startTime: '2026-11-10T12:10:00-08:00'}, {type: 'Performance Time', startTime: '2026-11-10T13:00:00-08:00'}]};
+const d2 = {sel: new Set(['s']), done: new Set(), ll: {}, llAt: 0, showAt: {s: Date.parse('2026-11-10T13:00:00-08:00')}, prev: {}, fired: new Set()};
+assert.deepEqual(events(d2, new Map([['s', show2]]), now), [], 'no alert for the 12:10 you did not plan');
+assert(events(d2, new Map([['s', show2]]), now + 35 * 6e4)[0].includes('1:00 PM'), 'alert for the planned 1:00');
 console.log('ok');
