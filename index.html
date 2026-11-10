@@ -238,17 +238,33 @@ function meters(a, b) {
 }
 // ponytail: straight line x1.4 at a slow crowd pace (70 m/min). No path map; add one if walk times mislead.
 const walkMin = (a, b) => Math.max(1, Math.round(meters(a, b) * 1.4 / 70));
-// ponytail: greedy day plan. Each ride takes its lowest-forecast hour, at most 2 rides an hour;
-// must-dos and rides whose wait swings the most choose first. Not a real optimiser; no walking or meals.
-// busy = times already spoken for (booked Lightning Lanes, planned shows); each takes one of its hour's 2 places.
-function plan(rides, busy = []) {
-  const used = {}, swing = r => Math.max(...r.fut.map(f => f.w)) - Math.min(...r.fut.map(f => f.w));
-  for (const t of busy) used[Math.floor(t / HOUR)] = (used[Math.floor(t / HOUR)] || 0) + 1;
-  return rides.filter(r => r.fut.length).sort((a, b) => b.star - a.star || swing(b) - swing(a)).map(r => {
-    const opts = [...r.fut].sort((a, b) => a.w - b.w || a.t - b.t), slot = f => Math.floor(f.t / HOUR), pick = opts.find(f => (used[slot(f)] || 0) < 2) || opts[0];
-    used[slot(pick)] = (used[slot(pick)] || 0) + 1;
-    return {r, t: pick.t, w: pick.w};
-  }).sort((a, b) => a.t - b.t);
+// ponytail: greedy day plan that walks the clock forward from now. At each point it does the ride you'd lose the
+// most by putting off (wait now minus its best wait later; must-dos count as 15 min more urgent), then moves the
+// clock on by that wait + RIDE_MIN. Fixed items (booked Lightning Lanes, planned shows) hold their times and rides
+// fit around them. If every ride left gets WAIT_FOR+ min shorter later, the plan leaves free time. Not a real optimiser: no meals, walking is folded into RIDE_MIN.
+const RIDE_MIN = 10, LL_MIN = 20, SHOW_MIN = 30, STAR_URGENCY = 15, WAIT_FOR = 20;
+function plan(rides, fixed, now, close) {
+  const waitAt = (r, t) => {
+    if (r.wait != null && t < now + 30 * MIN) return r.wait;
+    let w = r.fut[0].w;
+    for (const f of r.fut) if (f.t <= t) w = f.w;
+    return w;
+  };
+  const urgency = (r, t) => waitAt(r, t) - Math.min(waitAt(r, t), ...r.fut.filter(f => f.t > t).map(f => f.w)) - (r.star ? STAR_URGENCY : 0);
+  let t = now, left = rides.filter(r => r.fut.length).map(r => ({...r, fut: [...r.fut].sort((a, b) => a.t - b.t)}));
+  const fx = [...fixed].sort((a, b) => a.t - b.t), out = [];
+  while (left.length && t < close) {
+    const next = fx[0], fits = left.filter(r => !next || t + (waitAt(r, t) + RIDE_MIN) * MIN <= next.t);
+    if (!fits.length) {
+      if (!next) break;
+      fx.shift(); out.push(next); t = Math.max(t, next.t) + (next.ll ? LL_MIN : SHOW_MIN) * MIN;
+      continue;
+    }
+    const r = fits.sort((a, b) => urgency(a, t) - urgency(b, t) || waitAt(a, t) - waitAt(b, t))[0], w = waitAt(r, t);
+    if (urgency(r, t) > WAIT_FOR) { t += 30 * MIN; continue; }   // everything left gets much shorter later: free time
+    out.push({r: rides.find(x => x.id === r.id), t, w}); t += (w + RIDE_MIN) * MIN; left = left.filter(x => x !== r);
+  }
+  return {steps: [...out, ...fx], left: left.length};
 }
 
 function analyze(a, now, here) {
@@ -650,15 +666,17 @@ function renderNow() {
   // Fixed points in the day: booked Lightning Lanes and shows you've picked a time for. Rides fill in around them.
   const fixed = [...booked.map(r => ({r, t: day.ll[r.id].start, ll: 1})),
     ...myShows.filter(s => day.showAt[s.id] > now - 30 * MIN).map(s => ({r: s, t: day.showAt[s.id]}))];
-  const steps = plan(active, fixed.map(f => f.t)), noFc = active.length - steps.length;
-  const dayPlan = [...steps, ...fixed].sort((a, b) => a.t - b.t);
-  if (steps.length > 1 || fixed.length) out.push(h('details', {open: planOpen ?? fixed.length > 0, ontoggle: e => { planOpen = e.target.open; }},
+  const close = hours.date === day.date && Object.keys(hours.m).length ? Math.max(...Object.values(hours.m).map(x => x[1])) : now + 12 * HOUR;
+  const {steps: dayPlan, left} = plan(active, fixed, now, close), noFc = active.filter(r => !r.fut.length).length;
+  const round5 = t => Math.round(t / (5 * MIN)) * 5 * MIN;
+  if (dayPlan.length > 1 || fixed.length) out.push(h('details', {open: planOpen ?? fixed.length > 0, ontoggle: e => { planOpen = e.target.open; }},
     h('summary', null, h('h2', null, 'Your day plan')),
     h('div', {class: 'card'}, dayPlan.map(x => h('div', {class: 'row'},
-      h('div', {class: 'when' + (x.w == null ? ' llc' : '')}, x.w == null ? clock(x.t) : x.t <= now ? 'Now' : hour(x.t)),
+      h('div', {class: 'when' + (x.w == null ? ' llc' : '')}, x.w == null ? clock(x.t) : x.t <= now + 5 * MIN ? 'Now' : clock(round5(x.t))),
       h('div', {class: 'main'}, nameEl(x.r), dateOf(x.t) !== parkDay() && h('div', {class: 'meta'}, 'Tomorrow')),
       h('div', {class: 'meta'}, x.w != null ? `~${x.w} min` : x.ll ? '⚡ Lightning Lane' : '🎭 Show')))),
-    h('div', {class: 'note'}, 'Lightning Lanes and show times you’ve set are fixed; rides fill in around them, each at its quietest forecast hour, two things an hour, must-dos first.'
+    h('div', {class: 'note'}, 'Starts now and runs to closing: each ride’s wait plus about 10 minutes to ride and walk. Rides that get much better later wait; must-dos go sooner. Lightning Lanes and show times you’ve set stay put.'
+      + (left > 0 ? ` ${left} of your rides don’t fit before closing.` : '')
       + (noFc > 0 ? ` ${noFc} of your rides have no forecast, so fit them in when the wait looks good.` : ''))));
 
   if (done.length) out.push(h('details', {open: doneOpen, ontoggle: e => { doneOpen = e.target.open; }},
@@ -742,14 +760,17 @@ else if (store.get('geo', 0)) startGeo();
 // ?selftest: the one check that fails if the ranking, plan or show logic breaks.
 if (location.search.includes('selftest')) {
   const T = Date.parse('2026-11-10T12:00:00-08:00'), f = (h, w) => ({t: T + h * HOUR, w});
-  const p = plan([{id: 'a', star: false, fut: [f(1, 30), f(2, 60)]}, {id: 'b', star: false, fut: [f(1, 20), f(2, 25)]}, {id: 'c', star: true, fut: [f(1, 10), f(2, 90)]}]);
+  const R = [{id: 'a', star: false, fut: [f(0, 30), f(1, 60)]}, {id: 'b', star: false, fut: [f(0, 20), f(1, 25)]},
+    {id: 'c', star: true, fut: [f(0, 10), f(1, 90)]}, {id: 'd', star: false, fut: [f(0, 60), f(5, 5)]}];
+  const p = plan(R, [], T, T + 12 * HOUR).steps, ids = p.map(x => x.r.id).join('');
+  const q = plan(R.slice(0, 1), [{r: {id: 's'}, t: T + 10 * MIN}], T, T + 12 * HOUR).steps;
   const st = t => ({type: 'Performance Time', startTime: new Date(T + t * HOUR).toISOString(), endTime: new Date(T + t * HOUR).toISOString()});
   const ok = score(20, 0, 60) < score(15, 0, 20) && score(20, 10, 40) > score(20, 0, 40) && score(null, 0, 30) === Infinity
     && score(30, 0, 30, true) < score(25, 0, 30) && label(5, 30)[0] === 'Walk-on' && label(30, 60)[0] === 'Great time'
     && label(60, 40)[0] === 'Very busy' && label(40, 40)[0] === 'Typical'
     && walkMin({lat: 33.81, lng: -117.919}, {lat: 33.811, lng: -117.919}) === 2
-    && p.length === 3 && p.find(x => x.r.id === 'c').w === 10 && p.find(x => x.r.id === 'b').w === 25   // slot full, b bumped to hour 2
-    && plan([{id: 'b', star: false, fut: [f(1, 20), f(2, 25)]}], [T + HOUR, T + HOUR + MIN])[0].w === 25   // a booked hour is full
+    && ids === 'cbad' && p[0].t === T && p[1].t === T + 20 * MIN && p[3].t === T + 5 * HOUR   // must-do first, starts now; d waits for its 5-min slot
+    && q[0].r.id === 's' && q[1].t === T + 40 * MIN                   // a ride can't fit before the 12:10 show, so the show goes first
     && at('2026-11-10', '10:30') === Date.parse('2026-11-10T10:30:00-08:00') && at('2026-07-04', '09:05') === Date.parse('2026-07-04T09:05:00-07:00')
     && showNext({showtimes: [st(-2), st(3)]}, T).t === T + 3 * HOUR && showNext({showtimes: [st(-2)]}, T) === null;
   document.title = ok ? 'selftest ok' : 'selftest FAILED';
