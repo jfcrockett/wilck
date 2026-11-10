@@ -28,8 +28,8 @@ header{position:sticky;top:0;z-index:5;background:var(--brand);color:#fff;paddin
 .top{display:flex;align-items:center;gap:8px}
 h1{font-size:21px;margin:0;flex:1;letter-spacing:.2px}
 .hbtn{background:rgba(255,255,255,.14);color:#fff;border-radius:999px;padding:8px 12px;font-size:14px;min-height:38px;white-space:nowrap}
-.seg{display:flex;background:rgba(255,255,255,.12);border-radius:10px;padding:3px;margin-top:10px}
-.seg button{flex:1;color:#fff;font-size:14px;font-weight:600;padding:7px 4px;border-radius:8px;opacity:.8}
+.seg{display:flex;background:rgba(255,255,255,.12);border-radius:9px;padding:2px;margin-top:8px}
+.seg button{flex:auto;color:#fff;font-size:13px;font-weight:600;padding:5px 8px;border-radius:7px;opacity:.8;white-space:nowrap}
 .seg button[aria-pressed=true]{background:#fff;color:#14213d;opacity:1}
 .toast{display:flex;gap:10px;align-items:center;width:100%;text-align:left;background:var(--accent);color:var(--on-accent);border-radius:12px;padding:10px 12px;margin-top:8px;font-weight:650;font-size:15px}
 .toast span{flex:1}
@@ -40,7 +40,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--mute);
 .pad{padding:14px}
 .warn{background:#fff4d6;color:#6b4a00;border-radius:12px;padding:10px 12px;margin-bottom:10px;font-size:14px}
 .note{color:var(--mute);font-size:14px;padding:8px 6px}
-.hours{padding:0 6px 8px;font-size:13px}
+.hours{padding:0 6px 6px;font-size:13px}
 .note a{color:inherit;font-weight:650}
 
 /* tones */
@@ -135,13 +135,14 @@ nav button[aria-selected=true] span{border-bottom:2px solid var(--accent)}
 </header>
 <main>
   <section id="now"></section>
+  <section id="day" hidden></section>
   <section id="map" hidden><div id="mapmsg" class="warn" hidden></div><div id="mapbox"></div></section>
   <section id="pick" hidden>
     <input id="q" type="search" placeholder="Search rides and shows" autocomplete="off">
     <div id="picklist"></div>
   </section>
 </main>
-<nav><button id="t-now"><b>⏱</b><span>Now</span></button><button id="t-map"><b>🗺</b><span>Map</span></button><button id="t-pick"><b>☑</b><span id="t-pick-label"></span></button></nav>
+<nav><button id="t-now"><b>⏱</b><span>Now</span></button><button id="t-day"><b>📅</b><span>My day</span></button><button id="t-map"><b>🗺</b><span>Map</span></button><button id="t-pick"><b>☑</b><span id="t-pick-label"></span></button></nav>
 <script>
 // Wilck: pick your rides, see the best one to do right now. Static page, no login, no server.
 // Wait times, Lightning Lane return times, forecasts, show times and locations all come from themeparks.wiki.
@@ -184,6 +185,7 @@ let live = cache.live, shows = cache.shows || [], fetchedAt = cache.t, failed = 
 let places = store.get('places', {});       // id -> {lat,lng}
 let hours = store.get('hours', {date: '', m: {}});
 let pos = null, geoState = 'off';           // off | wait | on | denied | error
+let pickedFirst = new Set(store.get('sel', [])); // picks sort to the top, as of opening the tab (so rows don't jump when tapped)
 let doneOpen = false, planOpen = null, addOpen = false, form = {id: '', hm: ''}, toasts = [], imported = false;
 
 function freshDay() {
@@ -503,7 +505,7 @@ function rideRow(r, now) {
       h('div', {class: 'meta'}, dots([r.tag && h('span', {class: 'tag'}, r.tag[0]), r.walk != null && `🚶 ${r.walk} min`,
         r.typical != null && r.wait != null && `usual ${r.typical}`, r.llOpen && h('span', {class: 'llc'}, `⚡ ${clock(r.llOpen)}`),
         skipped && `skipped till ${clock(day.skip[r.id])}`])),
-      extras(r)),
+      r.trend?.startsWith('Better') && h('div', {class: 'extra'}, r.trend)),
     pill(r));
 }
 
@@ -592,23 +594,38 @@ async function renderMap() {
   focusId = null;
 }
 
-function renderNow() {
-  const now = Date.now(), out = [];
+// Shared top of Now and My day: stale-data warnings, loading, no picks yet, park hours. Returns true when there's nothing more to show.
+function intro(now, out, where) {
   if (failed) out.push(h('div', {class: 'warn'}, fetchedAt
     ? `Couldn't refresh. Showing wait times from ${clock(fetchedAt)}.` : `Couldn't load wait times. Check your signal and tap ↻.`));
   else if (fetchedAt && now - fetchedAt > 15 * MIN) out.push(h('div', {class: 'warn'}, `These wait times are from ${clock(fetchedAt)}. Tap ↻.`));
-  if (!live.length) { out.push(h('div', {class: 'note'}, failed ? '' : 'Loading wait times…')); return $('#now').replaceChildren(...out); }
+  if (!live.length) { out.push(h('div', {class: 'note'}, failed ? '' : 'Loading wait times…')); $(where).replaceChildren(...out); return true; }
   if (!sel.size) {
     out.push(h('div', {class: 'card pad'}, h('div', {class: 'name'}, 'Pick the rides you want today'),
-      h('div', {class: 'meta'}, 'Then this screen ranks them by the best use of your time right now.'),
+      h('div', {class: 'meta'}, 'Then Wilck ranks them by the best use of your time right now and plans your day.'),
       h('div', {class: 'acts'}, btn('Pick rides', () => { tab = 'pick'; render(); }, 'primary'))));
-    return $('#now').replaceChildren(...out);
+    $(where).replaceChildren(...out); return true;
   }
   if (hours.date === day.date) {
-    const hrs = Object.entries(PARKS).filter(([id]) => hours.m[id] && inPark({parkId: id}))
-      .map(([id, n]) => `${n[0]} ${clock(hours.m[id][0]).replace(':00', '')} to ${clock(hours.m[id][1]).replace(':00', '')}`);
-    if (hrs.length) out.push(h('div', {class: 'note hours'}, hrs.join(' · ')));
+    const short = t => clock(t).replace(':00', '').replace(' ', '').toLowerCase();
+    const hrs = Object.entries(PARKS).filter(([id]) => hours.m[id] && inPark({parkId: id})).map(([id, n]) => `${n[1]} ${short(hours.m[id][0])}–${short(hours.m[id][1])}`);
+    if (hrs.length) out.push(h('div', {class: 'note hours'}, 'Open today: ' + hrs.join(' · ')));
   }
+  return false;
+}
+// The day plan: booked Lightning Lanes and planned shows are fixed, rides fill in around them. Shared by Now (hero) and My day.
+function dayPlanFor(c, now) {
+  const myShows = shows.filter(s => sel.has(s.id) && inPark(s));
+  const fixed = [...c.booked.map(r => ({r, t: day.ll[r.id].start, ll: 1})),
+    ...myShows.filter(s => day.showAt[s.id] > now - 30 * MIN).map(s => ({r: s, t: day.showAt[s.id]}))];
+  const close = hours.date === day.date && Object.keys(hours.m).length ? Math.max(...Object.values(hours.m).map(x => x[1])) : now + 12 * HOUR;
+  const {steps, left} = plan(c.active, fixed, now, close, c.here);
+  return {myShows, fixed, steps, left, noFc: c.active.filter(r => !r.fut.length).length};
+}
+
+function renderNow() {
+  const now = Date.now(), out = [];
+  if (intro(now, out, '#now')) return;
   if (geoState === 'off' || geoState === 'denied' || geoState === 'error')
     out.push(h('div', {class: 'card row'}, h('div', {class: 'main'}, h('div', {class: 'name'}, 'Rank by what’s closest'),
       h('div', {class: 'meta'}, geoState === 'denied' ? 'Location is blocked. Allow it for this site in your browser settings.'
@@ -620,14 +637,36 @@ function renderNow() {
       h('div', {class: 'meta'}, 'Rides reopening, great waits, Lightning Lane windows and show times, even with the app closed.')),
       btn('Turn on', enablePush, 'small primary')));
 
-  const {rows, done, booked, open, shut, llPicks, best, near, active, here} = compute(now);
-  const myShows = shows.filter(s => sel.has(s.id) && inPark(s));
+  const c = compute(now), {rows, done, booked, shut, llPicks} = c;
+  let {open, best, near} = c;
+  const dp = dayPlanFor(c, now);
+  // "Do this now" is the plan's first ride, so the two never disagree.
+  const pf = dp.steps.find(x => x.w != null);
+  const pr = pf && pf.t <= now + 5 * MIN && [best, ...near, ...open].find(r => r && r.id === pf.r.id && r.wait != null && !(day.skip[r.id] > now));
+  if (pr && pr !== best) {
+    open = open.filter(r => r !== pr); near = near.filter(r => r !== pr);
+    if (best) open = [best, ...open];
+    best = pr;
+  }
+  // Nothing fits before a show or Lightning Lane in the next hour: head there instead.
+  const nf = !pr && dp.steps[0]?.w == null && dp.steps[0]?.t - now < HOUR ? dp.steps[0] : null;
+  if (nf) {
+    if (best) open = [best, ...open];
+    best = null;
+    const walk = c.here && places[nf.r.id] ? walkMin(c.here, places[nf.r.id]) : null, leave = nf.t - (walk || 0) * MIN;
+    out.push(h('div', {class: 'card hero'}, h('div', {class: 'eyebrow'}, 'Next up'), h('div', {class: 'pad'},
+      nameEl(nf.r),
+      h('div', {class: 'why'}, dots([nf.ll ? h('span', {class: 'llc'}, `⚡ Lightning Lane at ${clock(nf.t)}`) : `🎭 Show at ${clock(nf.t)}`,
+        walk != null && `🚶 ${walk} min walk`])),
+      h('div', {class: 'extra'}, leave - now > 5 * MIN ? `Leave by ${clock(leave)} (in ${mins(leave - now)} min). Nothing else fits before it.` : 'Head there now.'),
+      places[nf.r.id] && h('div', {class: 'acts'}, btn('📍 Map', showOnMap(nf.r.id), 'primary')))));
+  }
   if (best) out.push(hero(best));
-  else if (!rows.length && !myShows.length) out.push(h('div', {class: 'note'}, 'None of your picks are in this park.'));
+  else if (nf) {}
+  else if (!rows.length && !dp.myShows.length) out.push(h('div', {class: 'note'}, 'None of your picks are in this park.'));
   else if (!open.length && !near.length && shut.length) out.push(h('div', {class: 'note'}, 'None of your remaining picks are running right now.'));
 
   if (near.length) out.push(h('h2', null, 'While you’re here'), h('div', {class: 'card'}, near.map(r => rideRow(r, now))));
-
   const anyBooked = Object.keys(day.ll).length > 0;
   if (anyBooked || llPicks.length) {
     const ready = llReady(), canBook = !anyBooked || now >= ready;
@@ -650,12 +689,38 @@ function renderNow() {
     if (llPicks.length) out.push(h('div', {class: 'note'}, 'Book in the Disneyland app, then tap Booked.'));
   }
 
-  out.push(addCard(now));
+  if (open.length) out.push(h('h2', null, 'Up next'), h('div', {class: 'card'}, open.map(r => rideRow(r, now))));
+  if (shut.length) out.push(h('h2', null, 'Not running'), h('div', {class: 'card'}, shut.map(r => rideRow(r, now))));
 
+  out.push(h('div', {class: 'note'}, 'Your plan for the rest of the day is in ', h('a', {href: '#', onclick: e => { e.preventDefault(); tab = 'day'; render(); scrollTo(0, 0); }}, '📅 My day'), '.'));
+  if (done.length) out.push(h('details', {open: doneOpen, ontoggle: e => { doneOpen = e.target.open; }},
+    h('summary', null, h('h2', null, `Done today (${done.length})`)),
+    h('div', {class: 'card'}, done.map(r => h('div', {class: 'row off done'}, check(r, true), h('div', {class: 'main'}, nameEl(r)))))));
+  if (!navigator.standalone && !matchMedia('(display-mode: standalone)').matches)
+    out.push(h('div', {class: 'note'}, 'Tip: tap Share, then Add to Home Screen, to open Wilck like an app and get lock-screen alerts.'));
+  if (pushSub) out.push(h('div', {class: 'note'}, '🔔 Lock-screen alerts are on. ', h('a', {href: '#', onclick: e => { e.preventDefault(); sync(true); }}, 'Send a test')));
+  $('#now').replaceChildren(...out);
+}
+
+function renderDay() {
+  const now = Date.now(), out = [];
+  if (intro(now, out, '#day')) return;
+  const c = compute(now), {myShows, fixed, steps: dayPlan, left, noFc} = dayPlanFor(c, now);
+  const round5 = t => Math.round(t / (5 * MIN)) * 5 * MIN;
+  out.push(h('h2', null, 'Your day'));
+  if (dayPlan.length) out.push(h('div', {class: 'card'}, dayPlan.map(x => h('div', {class: 'row'},
+    h('div', {class: 'when' + (x.w == null ? ' llc' : '')}, x.w == null ? clock(x.t) : x.t <= now + 5 * MIN ? 'Now' : clock(round5(x.t))),
+    h('div', {class: 'main'}, nameEl(x.r), dateOf(x.t) !== parkDay() && h('div', {class: 'meta'}, 'Tomorrow')),
+    h('div', {class: 'meta'}, x.w != null ? (x.walk != null ? `🚶 ${x.walk} · ` : '') + `~${x.w} min` : x.ll ? '⚡ Lightning Lane' : '🎭 Show')))));
+  else out.push(h('div', {class: 'note'}, 'Nothing to plan yet: your rides need today’s forecast. Add Lightning Lanes and show times below and they’ll show here.'));
+  out.push(h('div', {class: 'note'}, 'Rebuilt every minute from live waits and where you are: each ride’s walk, wait and about 5 minutes to ride. Rides that get much better later wait; must-dos go sooner.'
+    + (left > 0 ? ` ${left} of your rides don’t fit before closing.` : '')
+    + (noFc > 0 ? ` ${noFc} of your rides have no forecast, so fit them in when the wait looks good.` : '')));
+  out.push(addCard(now));
   if (myShows.length) {
-    const list = myShows.map(s => ({s, n: day.showAt[s.id] > now - 30 * MIN ? {t: day.showAt[s.id], pin: 1} : showNext(s, now), walk: here && places[s.id] ? walkMin(here, places[s.id]) : null}))
+    const list = myShows.map(s => ({s, n: day.showAt[s.id] > now - 30 * MIN ? {t: day.showAt[s.id], pin: 1} : showNext(s, now), walk: c.here && places[s.id] ? walkMin(c.here, places[s.id]) : null}))
       .sort((a, b) => (a.n ? a.n.t || 0 : Infinity) - (b.n ? b.n.t || 0 : Infinity));
-    out.push(h('h2', null, 'Shows'), h('div', {class: 'card'}, list.map(({s, n, walk}) => h('div', {class: 'row' + (n ? '' : ' off')},
+    out.push(h('h2', null, 'Shows · tap a time to plan it'), h('div', {class: 'card'}, list.map(({s, n, walk}) => h('div', {class: 'row' + (n ? '' : ' off')},
       h('div', {class: 'main'}, nameEl(s), h('div', {class: 'meta'}, dots([
         n?.pin && h('span', {class: 'llc'}, `📌 Going at ${when(n.t)}`),
         !n ? 'No more today' : n.until ? `On now until ${clock(n.until)}` : n.t > now ? `in ${span(n.t - now)}` : 'Starting now',
@@ -665,32 +730,7 @@ function renderNow() {
       n?.t && h('div', {class: 'pill txt none'}, clock(n.t))))));
   }
 
-  if (open.length) out.push(h('h2', null, 'Up next'), h('div', {class: 'card'}, open.map(r => rideRow(r, now))));
-  if (shut.length) out.push(h('h2', null, 'Not running'), h('div', {class: 'card'}, shut.map(r => rideRow(r, now))));
-
-  // Fixed points in the day: booked Lightning Lanes and shows you've picked a time for. Rides fill in around them.
-  const fixed = [...booked.map(r => ({r, t: day.ll[r.id].start, ll: 1})),
-    ...myShows.filter(s => day.showAt[s.id] > now - 30 * MIN).map(s => ({r: s, t: day.showAt[s.id]}))];
-  const close = hours.date === day.date && Object.keys(hours.m).length ? Math.max(...Object.values(hours.m).map(x => x[1])) : now + 12 * HOUR;
-  const {steps: dayPlan, left} = plan(active, fixed, now, close, here), noFc = active.filter(r => !r.fut.length).length;
-  const round5 = t => Math.round(t / (5 * MIN)) * 5 * MIN;
-  if (dayPlan.length > 1 || fixed.length) out.push(h('details', {open: planOpen ?? fixed.length > 0, ontoggle: e => { planOpen = e.target.open; }},
-    h('summary', null, h('h2', null, 'Your day plan')),
-    h('div', {class: 'card'}, dayPlan.map(x => h('div', {class: 'row'},
-      h('div', {class: 'when' + (x.w == null ? ' llc' : '')}, x.w == null ? clock(x.t) : x.t <= now + 5 * MIN ? 'Now' : clock(round5(x.t))),
-      h('div', {class: 'main'}, nameEl(x.r), dateOf(x.t) !== parkDay() && h('div', {class: 'meta'}, 'Tomorrow')),
-      h('div', {class: 'meta'}, x.w != null ? (x.walk != null ? `🚶 ${x.walk} · ` : '') + `~${x.w} min` : x.ll ? '⚡ Lightning Lane' : '🎭 Show')))),
-    h('div', {class: 'note'}, 'Rebuilt on every refresh from live waits and where you are. Starts now and runs to closing: each ride’s walk, wait and about 5 minutes to ride. Rides that get much better later wait; must-dos go sooner. Lightning Lanes and show times you’ve set stay put.'
-      + (left > 0 ? ` ${left} of your rides don’t fit before closing.` : '')
-      + (noFc > 0 ? ` ${noFc} of your rides have no forecast, so fit them in when the wait looks good.` : ''))));
-
-  if (done.length) out.push(h('details', {open: doneOpen, ontoggle: e => { doneOpen = e.target.open; }},
-    h('summary', null, h('h2', null, `Done today (${done.length})`)),
-    h('div', {class: 'card'}, done.map(r => h('div', {class: 'row off done'}, check(r, true), h('div', {class: 'main'}, nameEl(r)))))));
-  if (!navigator.standalone && !matchMedia('(display-mode: standalone)').matches)
-    out.push(h('div', {class: 'note'}, 'Tip: tap Share, then Add to Home Screen, to open Wilck like an app and get lock-screen alerts.'));
-  if (pushSub) out.push(h('div', {class: 'note'}, '🔔 Lock-screen alerts are on. ', h('a', {href: '#', onclick: e => { e.preventDefault(); sync(true); }}, 'Send a test')));
-  $('#now').replaceChildren(...out);
+  $('#day').replaceChildren(...out);
 }
 
 function share() {
@@ -708,7 +748,7 @@ function renderPick() {
     sel.size > 0 && btn('Clear all', () => { if (confirm('Clear all your picks?')) { sel.clear(); stars.clear(); set(); } }, 'small')));
   if (sel.size) out.push(h('div', {class: 'note'}, 'Tap ★ on a pick to make it a must-do. Must-dos rank higher.'));
   const group = (title, list, right, starrable) => {
-    list = list.filter(a => inPark(a) && a.name.toLowerCase().includes(q)).sort((a, b) => a.name.localeCompare(b.name));
+    list = list.filter(a => inPark(a) && a.name.toLowerCase().includes(q)).sort((a, b) => pickedFirst.has(b.id) - pickedFirst.has(a.id) || a.name.localeCompare(b.name));
     if (list.length) out.push(h('h2', null, title), h('div', {class: 'card'}, list.map(a => {
       const on = sel.has(a.id), st = stars.has(a.id);
       return h('div', {class: 'row pickrow' + (on ? ' sel' : '')},
@@ -732,6 +772,7 @@ function head() {
   $('#t-now').setAttribute('aria-selected', tab === 'now');
   $('#t-pick').setAttribute('aria-selected', tab === 'pick');
   $('#t-map').setAttribute('aria-selected', tab === 'map');
+  $('#t-day').setAttribute('aria-selected', tab === 'day');
   $('#refresh').textContent = loading ? '↻ …' : fetchedAt ? '↻ ' + clock(fetchedAt) : '↻';
   $('#geo').textContent = {off: '📍 Off', wait: '📍 Finding…', on: atPark() ? '📍 On' : '📍 Not in park', denied: '📍 Blocked', error: '📍 Retry'}[geoState];
   $('#seg').replaceChildren(...[['all', 'Both parks'], ...Object.entries(PARKS).map(([id, n]) => [id, n[0]])].map(([id, n]) =>
@@ -741,14 +782,15 @@ function head() {
 }
 function render() {
   freshDay(); head();
-  $('#now').hidden = tab !== 'now'; $('#pick').hidden = tab !== 'pick'; $('#map').hidden = tab !== 'map';
+  $('#now').hidden = tab !== 'now'; $('#day').hidden = tab !== 'day'; $('#pick').hidden = tab !== 'pick'; $('#map').hidden = tab !== 'map';
   $('main').classList.toggle('mapmode', tab === 'map');
-  tab === 'now' ? renderNow() : tab === 'pick' ? renderPick() : renderMap();
+  tab === 'now' ? renderNow() : tab === 'day' ? renderDay() : tab === 'pick' ? renderPick() : renderMap();
 }
 
 $('#t-now').onclick = () => { tab = 'now'; render(); scrollTo(0, 0); };
 $('#t-map').onclick = () => { tab = 'map'; render(); scrollTo(0, 0); };
-$('#t-pick').onclick = () => { tab = 'pick'; render(); scrollTo(0, 0); };
+$('#t-day').onclick = () => { tab = 'day'; render(); scrollTo(0, 0); };
+$('#t-pick').onclick = () => { tab = 'pick'; pickedFirst = new Set(sel); render(); scrollTo(0, 0); };
 $('#refresh').onclick = load;
 $('#geo').onclick = () => { if (geoState !== 'on' && geoState !== 'wait') startGeo(); };
 $('#q').oninput = renderPick;
