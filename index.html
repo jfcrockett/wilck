@@ -130,7 +130,7 @@ const walkMin = (a, b) => Math.max(1, Math.round(meters(a, b) * 1.4 / 70));
 function analyze(a, now, here) {
   const q = a.queue || {}, p = places[a.id];
   const wait = a.status === 'OPERATING' ? (q.STANDBY?.waitTime ?? null) : null;
-  const fc = (a.forecast || []).filter(f => f.waitTime != null).map(f => ({t: Date.parse(f.time), w: f.waitTime}));
+  const fc = (a.forecast || []).filter(f => f.waitTime > 0).map(f => ({t: Date.parse(f.time), w: f.waitTime}));
   const rest = fc.filter(f => f.t >= now - 36e5), pool = rest.length ? rest : fc;
   const typical = pool.length ? Math.round(pool.reduce((s, f) => s + f.w, 0) / pool.length) : null;
   const future = fc.filter(f => f.t > now);
@@ -255,7 +255,8 @@ function renderNow() {
   const active = rows.filter(r => !day.done.includes(r.id) && !day.ll[r.id]);
   const open = active.filter(r => r.status === 'OPERATING').sort((a, b) => a.score - b.score || a.wait - b.wait);
   const shut = active.filter(r => r.status !== 'OPERATING');
-  const llPicks = open.filter(r => r.llOpen).sort((a, b) => b.llScore - a.llScore);
+  // A Lightning Lane is only worth spending on a ride that would cost 15+ min of standby.
+  const llPicks = open.filter(r => r.llOpen && r.saves >= 15).sort((a, b) => b.llScore - a.llScore);
 
   if (open.length && open[0].wait != null) {
     const best = open.shift();
