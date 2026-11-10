@@ -157,6 +157,7 @@ const parkDay = () => new Date().toLocaleDateString('en-CA', {timeZone: TZ});
 const clock = t => new Date(t).toLocaleTimeString('en-US', {timeZone: TZ, hour: 'numeric', minute: '2-digit'});
 const hour = t => new Date(t).toLocaleTimeString('en-US', {timeZone: TZ, hour: 'numeric'});
 const mins = ms => Math.max(0, Math.round(ms / MIN));
+const span = ms => mins(ms) < 90 ? mins(ms) + ' min' : Math.round(ms / HOUR) + ' h';
 
 const hadSel = store.get('sel', null) !== null;
 let sel = new Set(store.get('sel', []));    // picked rides and shows
@@ -544,7 +545,7 @@ function renderNow() {
       .sort((a, b) => (a.n ? a.n.t || 0 : Infinity) - (b.n ? b.n.t || 0 : Infinity));
     out.push(h('h2', null, 'Shows'), h('div', {class: 'card'}, list.map(({s, n, walk}) => h('div', {class: 'row' + (n ? '' : ' off')},
       h('div', {class: 'main'}, nameEl(s), h('div', {class: 'meta'}, dots([
-        !n ? 'No more today' : n.until ? `On now until ${clock(n.until)}` : n.t > now ? `in ${mins(n.t - now)} min` : 'Starting now',
+        !n ? 'No more today' : n.until ? `On now until ${clock(n.until)}` : n.t > now ? `in ${span(n.t - now)}` : 'Starting now',
         walk != null && `🚶 ${walk} min`]))),
       n?.t && h('div', {class: 'pill txt none'}, clock(n.t))))));
   }
