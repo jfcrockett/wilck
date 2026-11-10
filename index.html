@@ -240,10 +240,12 @@ function meters(a, b) {
 const walkMin = (a, b) => Math.max(1, Math.round(meters(a, b) * 1.4 / 70));
 // ponytail: greedy day plan that walks the clock forward from now. At each point it does the ride you'd lose the
 // most by putting off (wait now minus its best wait later; must-dos count as 15 min more urgent), then moves the
-// clock on by that wait + RIDE_MIN. Fixed items (booked Lightning Lanes, planned shows) hold their times and rides
-// fit around them. If every ride left gets WAIT_FOR+ min shorter later, the plan leaves free time. Not a real optimiser: no meals, walking is folded into RIDE_MIN.
-const RIDE_MIN = 10, LL_MIN = 20, SHOW_MIN = 30, STAR_URGENCY = 15, WAIT_FOR = 20;
-function plan(rides, fixed, now, close) {
+// clock on by walk + wait + RIDE_MIN. Walks start from where you are (if location is on) and then from the last ride;
+// a minute of walking counts the same as a minute of waiting, so nearby rides win ties. Without location every walk is
+// NO_GPS_WALK. Fixed items (booked Lightning Lanes, planned shows) hold their times and rides fit around them. If every
+// ride left gets WAIT_FOR+ min shorter later, the plan leaves free time. Not a real optimiser: no meals.
+const RIDE_MIN = 5, NO_GPS_WALK = 5, LL_MIN = 20, SHOW_MIN = 30, STAR_URGENCY = 15, WAIT_FOR = 20;
+function plan(rides, fixed, now, close, here) {
   const waitAt = (r, t) => {
     if (t < now + 30 * MIN && r.status && r.status !== 'OPERATING') return 999;   // down right now: not before it's had time to reopen
     if (r.wait != null && t < now + 30 * MIN) return r.wait;
@@ -252,18 +254,20 @@ function plan(rides, fixed, now, close) {
     return w;
   };
   const urgency = (r, t) => waitAt(r, t) - Math.min(waitAt(r, t), ...r.fut.filter(f => f.t > t).map(f => f.w)) - (r.star ? STAR_URGENCY : 0);
-  let t = now, left = rides.filter(r => r.fut.length && !['CLOSED', 'REFURBISHMENT'].includes(r.status)).map(r => ({...r, fut: [...r.fut].sort((a, b) => a.t - b.t)}));
+  let at = here, t = now, left = rides.filter(r => r.fut.length && !['CLOSED', 'REFURBISHMENT'].includes(r.status)).map(r => ({...r, fut: [...r.fut].sort((a, b) => a.t - b.t)}));
   const fx = [...fixed].sort((a, b) => a.t - b.t), out = [];
   while (left.length && t < close) {
-    const next = fx[0], fits = left.filter(r => !next || t + (waitAt(r, t) + RIDE_MIN) * MIN <= next.t);
+    const walk = r => at && places[r.id] ? walkMin(at, places[r.id]) : NO_GPS_WALK, cost = r => walk(r) + waitAt(r, t) + RIDE_MIN;
+    const next = fx[0], fits = left.filter(r => !next || t + cost(r) * MIN <= next.t);
     if (!fits.length) {
       if (!next) break;
-      fx.shift(); out.push(next); t = Math.max(t, next.t) + (next.ll ? LL_MIN : SHOW_MIN) * MIN;
+      fx.shift(); out.push(next); t = Math.max(t, next.t) + (next.ll ? LL_MIN : SHOW_MIN) * MIN; at = places[next.r.id] || at;
       continue;
     }
-    const r = fits.sort((a, b) => urgency(a, t) - urgency(b, t) || waitAt(a, t) - waitAt(b, t))[0], w = waitAt(r, t);
+    const r = fits.sort((a, b) => urgency(a, t) + walk(a) - urgency(b, t) - walk(b) || waitAt(a, t) - waitAt(b, t))[0], w = waitAt(r, t);
     if (urgency(r, t) > WAIT_FOR) { t += 30 * MIN; continue; }   // everything left gets much shorter later: free time
-    out.push({r: rides.find(x => x.id === r.id), t, w}); t += (w + RIDE_MIN) * MIN; left = left.filter(x => x !== r);
+    out.push({r: rides.find(x => x.id === r.id), t, w, walk: at && places[r.id] ? walk(r) : null});
+    t += cost(r) * MIN; at = places[r.id] || at; left = left.filter(x => x !== r);
   }
   return {steps: [...out, ...fx], left: left.length};
 }
@@ -668,15 +672,15 @@ function renderNow() {
   const fixed = [...booked.map(r => ({r, t: day.ll[r.id].start, ll: 1})),
     ...myShows.filter(s => day.showAt[s.id] > now - 30 * MIN).map(s => ({r: s, t: day.showAt[s.id]}))];
   const close = hours.date === day.date && Object.keys(hours.m).length ? Math.max(...Object.values(hours.m).map(x => x[1])) : now + 12 * HOUR;
-  const {steps: dayPlan, left} = plan(active, fixed, now, close), noFc = active.filter(r => !r.fut.length).length;
+  const {steps: dayPlan, left} = plan(active, fixed, now, close, here), noFc = active.filter(r => !r.fut.length).length;
   const round5 = t => Math.round(t / (5 * MIN)) * 5 * MIN;
   if (dayPlan.length > 1 || fixed.length) out.push(h('details', {open: planOpen ?? fixed.length > 0, ontoggle: e => { planOpen = e.target.open; }},
     h('summary', null, h('h2', null, 'Your day plan')),
     h('div', {class: 'card'}, dayPlan.map(x => h('div', {class: 'row'},
       h('div', {class: 'when' + (x.w == null ? ' llc' : '')}, x.w == null ? clock(x.t) : x.t <= now + 5 * MIN ? 'Now' : clock(round5(x.t))),
       h('div', {class: 'main'}, nameEl(x.r), dateOf(x.t) !== parkDay() && h('div', {class: 'meta'}, 'Tomorrow')),
-      h('div', {class: 'meta'}, x.w != null ? `~${x.w} min` : x.ll ? '⚡ Lightning Lane' : '🎭 Show')))),
-    h('div', {class: 'note'}, 'Starts now and runs to closing: each ride’s wait plus about 10 minutes to ride and walk. Rides that get much better later wait; must-dos go sooner. Lightning Lanes and show times you’ve set stay put.'
+      h('div', {class: 'meta'}, x.w != null ? (x.walk != null ? `🚶 ${x.walk} · ` : '') + `~${x.w} min` : x.ll ? '⚡ Lightning Lane' : '🎭 Show')))),
+    h('div', {class: 'note'}, 'Rebuilt on every refresh from live waits and where you are. Starts now and runs to closing: each ride’s walk, wait and about 5 minutes to ride. Rides that get much better later wait; must-dos go sooner. Lightning Lanes and show times you’ve set stay put.'
       + (left > 0 ? ` ${left} of your rides don’t fit before closing.` : '')
       + (noFc > 0 ? ` ${noFc} of your rides have no forecast, so fit them in when the wait looks good.` : ''))));
 
@@ -773,6 +777,9 @@ if (location.search.includes('selftest')) {
     && ids === 'cbad' && p[0].t === T && p[1].t === T + 20 * MIN && p[3].t === T + 5 * HOUR   // must-do first, starts now; d waits for its 5-min slot
     && plan([{id: 'x', status: 'DOWN', fut: [f(0, 10)]}, ...R.slice(1, 2)], [], T, T + 12 * HOUR).steps[0].r.id === 'b'   // down ride not first
     && plan([{id: 'x', status: 'REFURBISHMENT', fut: [f(0, 10)]}], [], T, T + 12 * HOUR).steps.length === 0
+    && (() => { places.n1 = {lat: 33.8100, lng: -117.919}; places.n2 = {lat: 33.8150, lng: -117.919};
+         const z = plan([{id: 'n2', fut: [f(0, 20)]}, {id: 'n1', fut: [f(0, 20)]}], [], T, T + 12 * HOUR, {lat: 33.8101, lng: -117.919}).steps;
+         delete places.n1; delete places.n2; return z[0].r.id === 'n1' && z[1].walk > 5; })()   // nearest first, then walk from there
     && q[0].r.id === 's' && q[1].t === T + 40 * MIN                   // a ride can't fit before the 12:10 show, so the show goes first
     && at('2026-11-10', '10:30') === Date.parse('2026-11-10T10:30:00-08:00') && at('2026-07-04', '09:05') === Date.parse('2026-07-04T09:05:00-07:00')
     && showNext({showtimes: [st(-2), st(3)]}, T).t === T + 3 * HOUR && showNext({showtimes: [st(-2)]}, T) === null;
