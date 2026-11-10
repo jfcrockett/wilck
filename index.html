@@ -245,13 +245,14 @@ const walkMin = (a, b) => Math.max(1, Math.round(meters(a, b) * 1.4 / 70));
 const RIDE_MIN = 10, LL_MIN = 20, SHOW_MIN = 30, STAR_URGENCY = 15, WAIT_FOR = 20;
 function plan(rides, fixed, now, close) {
   const waitAt = (r, t) => {
+    if (t < now + 30 * MIN && r.status && r.status !== 'OPERATING') return 999;   // down right now: not before it's had time to reopen
     if (r.wait != null && t < now + 30 * MIN) return r.wait;
     let w = r.fut[0].w;
     for (const f of r.fut) if (f.t <= t) w = f.w;
     return w;
   };
   const urgency = (r, t) => waitAt(r, t) - Math.min(waitAt(r, t), ...r.fut.filter(f => f.t > t).map(f => f.w)) - (r.star ? STAR_URGENCY : 0);
-  let t = now, left = rides.filter(r => r.fut.length).map(r => ({...r, fut: [...r.fut].sort((a, b) => a.t - b.t)}));
+  let t = now, left = rides.filter(r => r.fut.length && !['CLOSED', 'REFURBISHMENT'].includes(r.status)).map(r => ({...r, fut: [...r.fut].sort((a, b) => a.t - b.t)}));
   const fx = [...fixed].sort((a, b) => a.t - b.t), out = [];
   while (left.length && t < close) {
     const next = fx[0], fits = left.filter(r => !next || t + (waitAt(r, t) + RIDE_MIN) * MIN <= next.t);
@@ -770,6 +771,8 @@ if (location.search.includes('selftest')) {
     && label(60, 40)[0] === 'Very busy' && label(40, 40)[0] === 'Typical'
     && walkMin({lat: 33.81, lng: -117.919}, {lat: 33.811, lng: -117.919}) === 2
     && ids === 'cbad' && p[0].t === T && p[1].t === T + 20 * MIN && p[3].t === T + 5 * HOUR   // must-do first, starts now; d waits for its 5-min slot
+    && plan([{id: 'x', status: 'DOWN', fut: [f(0, 10)]}, ...R.slice(1, 2)], [], T, T + 12 * HOUR).steps[0].r.id === 'b'   // down ride not first
+    && plan([{id: 'x', status: 'REFURBISHMENT', fut: [f(0, 10)]}], [], T, T + 12 * HOUR).steps.length === 0
     && q[0].r.id === 's' && q[1].t === T + 40 * MIN                   // a ride can't fit before the 12:10 show, so the show goes first
     && at('2026-11-10', '10:30') === Date.parse('2026-11-10T10:30:00-08:00') && at('2026-07-04', '09:05') === Date.parse('2026-07-04T09:05:00-07:00')
     && showNext({showtimes: [st(-2), st(3)]}, T).t === T + 3 * HOUR && showNext({showtimes: [st(-2)]}, T) === null;
