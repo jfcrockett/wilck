@@ -366,7 +366,7 @@ let pushSub = null, syncTimer;
 function sync(test) {
   if (!pushSub || !day) return;
   const go = () => fetch(PUSH + '/sync', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({
-    sub: pushSub, sel: [...sel], done: day.done, ll: day.ll, llAt: day.llAt || 0, date: day.date, test: !!test})}).catch(() => {});
+    sub: pushSub, sel: [...sel], done: day.done, ll: day.ll, llAt: day.llAt || 0, showAt: day.showAt, date: day.date, test: !!test})}).catch(() => {});
   clearTimeout(syncTimer);
   if (test) return go();
   syncTimer = setTimeout(go, 1500);
