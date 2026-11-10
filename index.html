@@ -41,6 +41,7 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--mute);
 .warn{background:#fff4d6;color:#6b4a00;border-radius:12px;padding:10px 12px;margin-bottom:10px;font-size:14px}
 .note{color:var(--mute);font-size:14px;padding:8px 6px}
 .hours{padding:0 6px 8px;font-size:13px}
+.note a{color:inherit;font-weight:650}
 
 /* tones */
 .vg{--tone:var(--vg)}.g{--tone:var(--g)}.avg{--tone:var(--avg)}.busy{--tone:var(--busy)}.vb{--tone:var(--vb)}.none{--tone:var(--mute)}
@@ -147,6 +148,8 @@ const CENTER = {lat: 33.809, lng: -117.919}, TZ = 'America/Los_Angeles', SKIP_MI
 const LL_GAP = 2 * HOUR;      // Multi Pass: book the next one 2 hours after booking, or once you scan in
 const NEAR_MIN = 3;           // "near you" = this many minutes' walk or less
 const STAR_BOOST = .6;        // must-dos rank as if their wait were this much better
+const PUSH = 'https://push-production-4e7fd449.up.railway.app';   // server/index.js on Railway
+const VAPID_PUBLIC = 'BE8pGnnpSuYR3Cw4esIOlIWUzNJiePoNsWNK6GQQinOU50gZHzbasnyZs7sw7tDe8baH9DwOpf1djRNBDYViAcU';
 const $ = s => document.querySelector(s);
 
 const store = {
@@ -176,10 +179,11 @@ function freshDay() {
   if (!day || day.date !== parkDay()) day = {date: parkDay(), done: [], ll: {}};
   day.skip ||= {}; day.fired ||= {};
 }
-const saveDay = () => store.set('day', day);
+const saveDay = () => { store.set('day', day); sync(); };
 function savePicks() {
   store.set('sel', [...sel]); store.set('stars', [...stars]);
   history.replaceState(null, '', '#' + picksHash('p'));   // so Add to Home Screen and Share carry the picks
+  sync();
 }
 const picksHash = key => key + '=' + [...sel].map(i => i.slice(0, 8)).join('.') + (stars.size ? '&s=' + [...stars].map(i => i.slice(0, 8)).join('.') : '');
 // Picks arrive in the URL from a shared link (#share=) or from the home-screen copy of this page (#p=).
@@ -284,7 +288,7 @@ async function load() {
     store.set('live', {t: fetchedAt, live, shows});
     importPicks(); freshDay(); changes(fetchedAt);
   } catch { failed = true; }
-  loading = false; alerts(); render();
+  loading = false; alerts(); render(); sync();
   if (hours.date !== parkDay()) loadHours();
 }
 async function loadHours() {
@@ -334,6 +338,33 @@ function alerts() {
     const n = showNext(s, now);
     if (n?.t && n.t > now && n.t - now <= 30 * MIN) once('show' + s.id + n.t, `🎭 ${s.name} starts at ${clock(n.t)} (in ${mins(n.t - now)} min)`);
   }
+}
+
+// ---- lock-screen notifications (Web Push; on iPhone only from the home-screen app) ----
+// The server only knows what this posts: picks, done rides and Lightning Lane bookings. No location.
+const canPush = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+let pushSub = null, syncTimer;
+function sync(test) {
+  if (!pushSub || !day) return;
+  const go = () => fetch(PUSH + '/sync', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({
+    sub: pushSub, sel: [...sel], done: day.done, ll: day.ll, llAt: day.llAt || 0, date: day.date, test: !!test})}).catch(() => {});
+  clearTimeout(syncTimer);
+  if (test) return go();
+  syncTimer = setTimeout(go, 1500);
+}
+async function initPush() {
+  if (!canPush) return;
+  try { pushSub = await (await navigator.serviceWorker.ready).pushManager.getSubscription(); if (pushSub) { sync(); render(); } } catch {}
+}
+async function enablePush() {
+  try {
+    if (await Notification.requestPermission() !== 'granted') { toast('Notifications are blocked. Allow them for Wilck in Settings.'); return render(); }
+    const key = Uint8Array.from(atob(VAPID_PUBLIC.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+    pushSub = await (await navigator.serviceWorker.ready).pushManager.subscribe({userVisibleOnly: true, applicationServerKey: key});
+    await sync(true);
+    toast('Notifications on. A test is on its way.');
+  } catch { toast('Couldn’t turn on notifications.'); }
+  render();
 }
 
 // ---- location ----
@@ -510,6 +541,11 @@ function renderNow() {
         : geoState === 'error' ? 'Couldn’t get your location.' : 'Share your location to add walk times.')),
       geoState !== 'denied' && btn(geoState === 'error' ? 'Retry' : 'Turn on', startGeo, 'small primary')));
 
+  if (canPush && !pushSub && Notification.permission !== 'denied')
+    out.push(h('div', {class: 'card row'}, h('div', {class: 'main'}, h('div', {class: 'name'}, 'Get alerts on your lock screen'),
+      h('div', {class: 'meta'}, 'Rides reopening, great waits, Lightning Lane windows and show times, even with the app closed.')),
+      btn('Turn on', enablePush, 'small primary')));
+
   const {rows, done, booked, open, shut, llPicks, best, near, active, here} = compute(now);
   const myShows = shows.filter(s => sel.has(s.id) && inPark(s));
   if (best) out.push(hero(best));
@@ -565,7 +601,8 @@ function renderNow() {
     h('summary', null, h('h2', null, `Done today (${done.length})`)),
     h('div', {class: 'card'}, done.map(r => h('div', {class: 'row off done'}, check(r, true), h('div', {class: 'main'}, nameEl(r)))))));
   if (!navigator.standalone && !matchMedia('(display-mode: standalone)').matches)
-    out.push(h('div', {class: 'note'}, 'Tip: tap Share, then Add to Home Screen, to open Wilck like an app.'));
+    out.push(h('div', {class: 'note'}, 'Tip: tap Share, then Add to Home Screen, to open Wilck like an app and get lock-screen alerts.'));
+  if (pushSub) out.push(h('div', {class: 'note'}, '🔔 Lock-screen alerts are on. ', h('a', {href: '#', onclick: e => { e.preventDefault(); sync(true); }}, 'Send a test')));
   $('#now').replaceChildren(...out);
 }
 
@@ -631,7 +668,7 @@ $('#q').oninput = renderPick;
 setInterval(() => { if (!document.hidden) load(); }, 60000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - fetchedAt > 30000) load(); });
 setInterval(() => { if (!document.hidden) { alerts(); head(); } }, 30000);
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').then(initPush).catch(() => {});
 
 // ?at=lat,lng fakes a position for testing walk times away from the park.
 const fake = new URLSearchParams(location.search).get('at');

@@ -12,3 +12,14 @@ self.addEventListener('fetch', e => {
     return r;
   }).catch(() => caches.match(e.request, {ignoreSearch: true})));
 });
+
+// Lock-screen alerts from server/index.js. iOS requires every push to show a notification.
+self.addEventListener('push', e => {
+  let d = {};
+  try { d = e.data.json(); } catch {}
+  e.waitUntil(self.registration.showNotification(d.title || 'Wilck', {body: d.body || '', icon: 'icon-192.png'}));
+});
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({type: 'window'}).then(list => list[0] ? list[0].focus() : self.clients.openWindow('./')));
+});
