@@ -352,19 +352,28 @@ function toast(text) {
 function once(key, text) { if (!day.fired[key]) { day.fired[key] = 1; saveDay(); toast(text); } }
 // What changed on your picks since the last refresh, even if the app was closed in between.
 function changes(now) {
-  const prev = store.get('prev', null), cur = {};
+  const prev = store.get('prev', null), cur = {}, focus = focusIds(now);
   const old = prev && prev.date === day.date && now - prev.t < 4 * HOUR ? prev.m : {};
   for (const a of live) {
-    if (!sel.has(a.id) || day.done.includes(a.id)) continue;
+    if (!sel.has(a.id) || !inPark(a) || day.done.includes(a.id)) continue;
     const r = analyze(a, now, null), p = old[a.id], great = r.tag?.[0] === 'Great time';
     cur[a.id] = {s: r.status, g: great};
     if (!p) continue;
-    if (p.s === 'DOWN' && r.status === 'OPERATING') toast(`${r.name} is back up` + (r.wait != null ? ` · ${r.wait} min` : ''));
-    else if (p.s === 'OPERATING' && r.status === 'DOWN') toast(`${r.name} just went down`);
-    else if (great && !p.g && r.typical >= 20) toast(`${r.name} dropped to ${r.wait} min (usually ${r.typical})`);
+    if (focus.has(a.id) && p.s === 'DOWN' && r.status === 'OPERATING') toast(`${r.name} is back up` + (r.wait != null ? ` · ${r.wait} min` : ''));
+    else if (focus.has(a.id) && p.s === 'OPERATING' && r.status === 'DOWN') toast(`${r.name} just went down`);
+    else if (great && !p.g && r.typical >= 20) once('great' + a.id, `${r.name} dropped to ${r.wait} min (usually ${r.typical})`);
   }
   store.set('prev', {t: now, date: day.date, m: cur});
 }
+// Rides worth a down/back-up alert: the next 3 in your plan, plus anything a short walk away.
+const NEAR_ALERT_MIN = 5;
+function focusIds(now) {
+  if (!live.length || !day) return new Set();
+  const c = compute(now), dp = dayPlanFor(c, now);
+  return new Set([...dp.steps.filter(x => x.w != null).slice(0, 3).map(x => x.r.id), ...c.rows.filter(r => r.walk != null && r.walk <= NEAR_ALERT_MIN).map(r => r.id)]);
+}
+// Picks in the park you're at today: the only ones that alert.
+const todaysPicks = () => [...sel].filter(id => { const a = [...live, ...shows].find(x => x.id === id); return !a || inPark(a); });
 // Time-based nudges: Lightning Lane windows, next booking, shows about to start.
 function alerts() {
   freshDay();
@@ -376,8 +385,8 @@ function alerts() {
   }
   if (day.llAt && Object.keys(day.ll).length && now >= llReady()) once('next' + day.llAt, '⚡ You can book your next Lightning Lane now');
   for (const s of shows) {
-    if (!sel.has(s.id)) continue;
-    const n = day.showAt[s.id] ? {t: day.showAt[s.id]} : showNext(s, now);
+    if (!sel.has(s.id) || !inPark(s) || !day.showAt[s.id]) continue;   // only shows you've picked a time for
+    const n = {t: day.showAt[s.id]};
     if (n?.t && n.t > now && n.t - now <= 30 * MIN) once('show' + s.id + n.t, `🎭 ${s.name} starts at ${clock(n.t)} (in ${mins(n.t - now)} min)`);
   }
 }
@@ -389,7 +398,7 @@ let pushSub = null, syncTimer;
 function sync(test) {
   if (!pushSub || !day) return;
   const go = () => fetch(PUSH + '/sync', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({
-    sub: pushSub, sel: [...sel], done: day.done, ll: day.ll, llAt: day.llAt || 0, showAt: day.showAt, date: day.date, test: !!test})}).catch(() => {});
+    sub: pushSub, sel: todaysPicks(), focus: [...focusIds(Date.now())], done: day.done, ll: day.ll, llAt: day.llAt || 0, showAt: day.showAt, date: day.date, test: !!test})}).catch(() => {});
   clearTimeout(syncTimer);
   if (test) return go();
   syncTimer = setTimeout(go, 1500);
@@ -417,7 +426,7 @@ function startGeo() {
     const next = {lat: p.coords.latitude, lng: p.coords.longitude};
     const moved = !pos || meters(pos, next) > 25;
     geoState = 'on'; store.set('geo', 1);
-    if (moved) { pos = next; render(); }
+    if (moved) { pos = next; render(); sync(); }   // nearby rides changed
   }, e => {
     geoState = e.code === 1 ? 'denied' : 'error';
     if (e.code === 1) store.set('geo', 0);
@@ -637,6 +646,11 @@ function renderNow() {
       h('div', {class: 'meta'}, 'Rides reopening, great waits, Lightning Lane windows and show times, even with the app closed.')),
       btn('Turn on', enablePush, 'small primary')));
 
+  if (!day.park) {
+    out.push(h('div', {class: 'card pad'}, h('div', {class: 'name'}, 'Which park today?'),
+      h('div', {class: 'meta'}, 'Only that park’s picks send alerts. Your list stays as it is.'),
+      h('div', {class: 'acts'}, ...Object.entries(PARKS).map(([id, n]) => btn(n[0], setPark(id), 'primary')), btn('Both', setPark('all')))));
+  }
   const c = compute(now), {rows, done, booked, shut, llPicks} = c;
   let {open, best, near} = c;
   const dp = dayPlanFor(c, now);
@@ -745,7 +759,13 @@ function renderPick() {
   out.push(h('div', {class: 'picktools'},
     btn('＋ Add the headliners', () => { for (const a of live) if (inPark(a) && HEADLINERS.some(n => a.name.includes(n))) sel.add(a.id); set(); }, 'small'),
     sel.size > 0 && btn('Share my list', share, 'small'),
-    sel.size > 0 && btn('Clear all', () => { if (confirm('Clear all your picks?')) { sel.clear(); stars.clear(); set(); } }, 'small')));
+    sel.size > 0 && btn(park === 'all' ? 'Clear all' : `Clear ${PARKS[park][0]} picks`, () => {
+      const what = park === 'all' ? 'all your picks' : `your ${PARKS[park][0]} picks (other park’s stay)`;
+      if (!confirm(`Clear ${what}?`)) return;
+      for (const a of [...live, ...shows]) if (inPark(a)) { sel.delete(a.id); stars.delete(a.id); }
+      if (park === 'all') { sel.clear(); stars.clear(); }
+      set();
+    }, 'small')));
   if (sel.size) out.push(h('div', {class: 'note'}, 'Tap ★ on a pick to make it a must-do. Must-dos rank higher.'));
   const group = (title, list, right, starrable) => {
     list = list.filter(a => inPark(a) && a.name.toLowerCase().includes(q)).sort((a, b) => pickedFirst.has(b.id) - pickedFirst.has(a.id) || a.name.localeCompare(b.name));
@@ -767,6 +787,8 @@ function renderPick() {
   $('#picklist').replaceChildren(...out);
 }
 
+// The park switch is also "where I am today": it scopes alerts, and the app asks again each new day.
+const setPark = id => () => { park = id; fitted = false; store.set('park', id); day.park = id; saveDay(); render(); };
 function head() {
   $('#t-pick-label').textContent = `My picks (${sel.size})`;
   $('#t-now').setAttribute('aria-selected', tab === 'now');
@@ -776,7 +798,7 @@ function head() {
   $('#refresh').textContent = loading ? '↻ …' : fetchedAt ? '↻ ' + clock(fetchedAt) : '↻';
   $('#geo').textContent = {off: '📍 Off', wait: '📍 Finding…', on: atPark() ? '📍 On' : '📍 Not in park', denied: '📍 Blocked', error: '📍 Retry'}[geoState];
   $('#seg').replaceChildren(...[['all', 'Both parks'], ...Object.entries(PARKS).map(([id, n]) => [id, n[0]])].map(([id, n]) =>
-    h('button', {'aria-pressed': String(park === id), onclick: () => { park = id; fitted = false; store.set('park', id); render(); }}, n)));
+    h('button', {'aria-pressed': String(park === id), onclick: setPark(id)}, n)));
   $('#toasts').replaceChildren(...toasts.map(t => h('button', {class: 'toast', onclick: () => { toasts = toasts.filter(x => x !== t); render(); }},
     h('span', null, t.text), '✕')));
 }
