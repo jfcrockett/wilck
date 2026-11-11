@@ -14,7 +14,8 @@ const parkDay = () => new Date().toLocaleDateString('en-CA', {timeZone: TZ});
 const clock = t => new Date(t).toLocaleTimeString('en-US', {timeZone: TZ, hour: 'numeric', minute: '2-digit'});
 const mins = ms => Math.max(0, Math.round(ms / MIN));
 
-const devices = new Map();   // endpoint -> {sub, sel, done, ll, llAt, showAt, date, seen, prev, fired}
+const devices = new Map();   // endpoint -> {sub, sel, done, ll, llAt, showAt, focus, date, seen, prev, fired}
+// sel = picks in today's park only. focus = the next few rides in the plan + rides a short walk away (ids only, no location).
 
 function send(d, body) {
   return webpush.sendNotification(d.sub, JSON.stringify({title: 'Wilck', body}), {TTL: 600, urgency: 'high'}).catch(e => {
@@ -30,10 +31,9 @@ export function events(d, byId, now) {
     const a = byId.get(id);
     if (!a) continue;
     if (a.entityType === 'SHOW') {
-      // A show with a planned time only alerts for that time; otherwise the next performance.
-      const t = d.showAt?.[id] > now ? d.showAt[id]
-        : (a.showtimes || []).filter(x => x.type !== 'Operating').map(x => Date.parse(x.startTime)).filter(t => t > now).sort((x, y) => x - y)[0];
-      if (t && t - now <= 30 * MIN) once('show' + id + t, `🎭 ${a.name} starts at ${clock(t)} (in ${mins(t - now)} min)`);
+      // Only shows you've picked a time for.
+      const t = d.showAt?.[id];
+      if (t > now && t - now <= 30 * MIN) once('show' + id + t, `🎭 ${a.name} starts at ${clock(t)} (in ${mins(t - now)} min)`);
       continue;
     }
     if (d.done.has(id)) continue;
@@ -44,9 +44,10 @@ export function events(d, byId, now) {
     const p = d.prev[id];
     d.prev[id] = {s: a.status, g: great};
     if (!p) continue;
-    if (p.s === 'DOWN' && a.status === 'OPERATING') out.push(`${a.name} is back up` + (wait != null ? ` · ${wait} min` : ''));
-    else if (p.s === 'OPERATING' && a.status === 'DOWN') out.push(`${a.name} just went down`);
-    else if (great && !p.g) out.push(`${a.name} dropped to ${wait} min (usually ${typical})`);
+    const focus = d.focus?.has(id);   // up/down only matters for a ride you're about to do or standing near
+    if (focus && p.s === 'DOWN' && a.status === 'OPERATING') out.push(`${a.name} is back up` + (wait != null ? ` · ${wait} min` : ''));
+    else if (focus && p.s === 'OPERATING' && a.status === 'DOWN') out.push(`${a.name} just went down`);
+    else if (great && !p.g) once('great' + id, `${a.name} dropped to ${wait} min (usually ${typical})`);   // once a day per ride
   }
   const name = id => byId.get(id)?.name || 'Your ride', windows = Object.entries(d.ll);
   for (const [id, w] of windows) {
@@ -72,7 +73,7 @@ const isIds = v => Array.isArray(v) && v.length <= 300 && v.every(x => typeof x 
 function sync(b) {
   const ep = b?.sub?.endpoint;
   if (typeof ep !== 'string' || !PUSH_HOST.test(new URL(ep).hostname) || !b.sub.keys?.p256dh || !b.sub.keys?.auth) return 400;
-  if (!isIds(b.sel) || !isIds(b.done) || typeof b.ll !== 'object' || !b.ll || typeof b.date !== 'string') return 400;
+  if (!isIds(b.sel) || !isIds(b.done) || (b.focus != null && !isIds(b.focus)) || typeof b.ll !== 'object' || !b.ll || typeof b.date !== 'string') return 400;
   const old = devices.get(ep);
   if (!old && devices.size >= MAX_DEVICES) return 429;
   const ll = {};
@@ -81,7 +82,7 @@ function sync(b) {
   for (const [id, t] of Object.entries(b.showAt && typeof b.showAt === 'object' ? b.showAt : {}).slice(0, 40)) if (id.length <= 40 && Number.isFinite(t)) showAt[id] = t;
   const keep = old && old.date === b.date;   // same park day: remember what was already announced
   const d = {sub: {endpoint: ep, keys: {p256dh: b.sub.keys.p256dh, auth: b.sub.keys.auth}}, sel: new Set(b.sel), done: new Set(b.done), ll,
-    llAt: Number(b.llAt) || 0, showAt, date: b.date, seen: Date.now(), prev: keep ? old.prev : {}, fired: keep ? old.fired : new Set()};
+    llAt: Number(b.llAt) || 0, showAt, focus: new Set(b.focus || []), date: b.date, seen: Date.now(), prev: keep ? old.prev : {}, fired: keep ? old.fired : new Set()};
   devices.set(ep, d);
   if (b.test) send(d, 'Notifications are on. You’ll hear about your rides and Lightning Lanes here.');
   return 204;
