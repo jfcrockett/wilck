@@ -384,8 +384,8 @@ function alerts() {
     if (now < w.end && w.end - now <= 15 * MIN) once('end' + id + w.start, `⚡ ${name(id)}: Lightning Lane ends in ${mins(w.end - now)} min`);
   }
   if (day.llAt && Object.keys(day.ll).length && now >= llReady()) once('next' + day.llAt, '⚡ You can book your next Lightning Lane now');
-  for (const s of shows) {
-    if (!sel.has(s.id) || !inPark(s) || !day.showAt[s.id]) continue;   // only shows you've picked a time for
+  for (const s of [...shows, ...live]) {
+    if (!sel.has(s.id) || !inPark(s) || !day.showAt[s.id]) continue;   // only shows and rides you've picked a time for
     const n = {t: day.showAt[s.id]};
     if (n?.t && n.t > now && n.t - now <= 30 * MIN) once('show' + s.id + n.t, `🎭 ${s.name} starts at ${clock(n.t)} (in ${mins(n.t - now)} min)`);
   }
@@ -475,22 +475,27 @@ const pinShow = (id, t) => () => { if (day.showAt[id] === t) delete day.showAt[i
 const upcoming = (s, now) => (s.showtimes || []).filter(x => x.type !== 'Operating').map(x => Date.parse(x.startTime)).filter(t => t > now).sort((a, b) => a - b);
 const when = t => (dateOf(t) !== parkDay() ? 'tomorrow ' : '') + clock(t);
 // "Add to my day": a Lightning Lane you booked (any ride, any time) or a show time.
-function addToDay(id, t) {
-  const isShow = shows.some(s => s.id === id);
-  if (isShow) day.showAt[id] = t; else day.ll[id] = {start: t, end: t + HOUR};
+// Rides without a Lightning Lane (Turtle Talk, Animation Academy) default to "at a set time": planned like a show.
+const hasLL = id => { const q = live.find(a => a.id === id)?.queue || {}; return !!(q.RETURN_TIME || q.PAID_RETURN_TIME); };
+const ICON = {ll: '⚡', show: '🎭', time: '🕐'};
+function addToDay(id, t, kind) {
+  kind ||= shows.some(s => s.id === id) ? 'show' : form.kind || (hasLL(id) ? 'll' : 'time');
+  if (kind === 'll') day.ll[id] = {start: t, end: t + HOUR}; else day.showAt[id] = t;
   if (!sel.has(id)) { sel.add(id); savePicks(); }
   addOpen = false; form = {id: '', hm: ''};
-  saveDay(); toast(`${isShow ? '🎭' : '⚡'} ${[...live, ...shows].find(a => a.id === id).name} added for ${when(t)}`); render();
+  saveDay(); toast(`${ICON[kind]} ${[...live, ...shows].find(a => a.id === id).name} added for ${when(t)}`); render();
 }
 function addCard(now) {
   if (!addOpen) return h('div', {class: 'card row'}, h('div', {class: 'main'}, h('div', {class: 'name'}, 'Add to my day'),
-    h('div', {class: 'meta'}, 'A Lightning Lane you booked, or a show you want to catch. Your plan fits rides around them.')),
+    h('div', {class: 'meta'}, 'A Lightning Lane you booked, a show, or something at a set time like Turtle Talk. Your plan fits rides around them.')),
     btn('＋ Add', () => { addOpen = true; render(); }, 'small primary'));
   const opt = a => h('option', {value: a.id, selected: form.id === a.id}, a.name);
   const groups = Object.entries(PARKS).filter(([id]) => inPark({parkId: id})).flatMap(([id, n]) => [
-    h('optgroup', {label: n[0] + ' · Lightning Lane'}, live.filter(a => a.parkId === id).sort((a, b) => a.name.localeCompare(b.name)).map(opt)),
+    h('optgroup', {label: n[0] + ' · rides'}, live.filter(a => a.parkId === id).sort((a, b) => a.name.localeCompare(b.name)).map(opt)),
     h('optgroup', {label: n[0] + ' · shows'}, shows.filter(a => a.parkId === id).sort((a, b) => a.name.localeCompare(b.name)).map(opt))]);
   const show = shows.find(s => s.id === form.id), times = show ? upcoming(show, now) : [];
+  const kind = show ? 'show' : form.kind || (form.id && !hasLL(form.id) ? 'time' : 'll');
+  const kindBtn = (k, label) => h('button', {class: 'chip' + (kind === k ? ' on' : ''), onclick: () => { form.kind = k; render(); }}, label);
   const go = () => {
     if (!form.id || !form.hm) return toast('Pick a ride or show and a time'), render();
     let t = at(parkDay(), form.hm);
@@ -498,11 +503,13 @@ function addCard(now) {
     addToDay(form.id, t);
   };
   return h('div', {class: 'card pad addform'}, h('div', {class: 'name'}, 'Add to my day'),
-    h('select', {onchange: e => { form.id = e.target.value; render(); }}, h('option', {value: ''}, 'Choose a ride or show…'), groups),
+    h('select', {onchange: e => { form.id = e.target.value; form.kind = null; render(); }}, h('option', {value: ''}, 'Choose a ride or show…'), groups),
     times.length > 0 && h('div', null, h('div', {class: 'meta'}, 'Today’s show times:'),
       h('div', {class: 'chips'}, times.map(t => h('button', {class: 'chip', onclick: () => addToDay(show.id, t)}, clock(t))))),
-    h('input', {type: 'time', value: form.hm, 'aria-label': show ? 'Show time' : 'Lightning Lane return time', oninput: e => { form.hm = e.target.value; }}),
-    h('div', {class: 'meta'}, show ? 'Or type a time.' : 'Return time from the Disneyland app. The window runs an hour. A time that’s already passed today counts as tomorrow.'),
+    form.id && !show && h('div', {class: 'chips'}, kindBtn('ll', '⚡ Lightning Lane'), kindBtn('time', '🕐 At a set time')),
+    h('input', {type: 'time', value: form.hm, 'aria-label': kind === 'll' ? 'Lightning Lane return time' : 'Time', oninput: e => { form.hm = e.target.value; }}),
+    h('div', {class: 'meta'}, show ? 'Or type a time.' : kind === 'time' ? 'When you want to go, like the next Turtle Talk or Animation Academy session. It holds about 30 minutes in your plan.'
+      : 'Return time from the Disneyland app. The window runs an hour. A time that’s already passed today counts as tomorrow.'),
     h('div', {class: 'acts'}, btn('Add', go, 'primary'), btn('Cancel', () => { addOpen = false; render(); })));
 }
 const check = (r, on) => h('button', {class: 'chk' + (on ? ' on' : ''), 'aria-label': (on ? 'Undo ' : 'Rode ') + r.name, onclick: on ? unrode(r.id) : rode(r.id)}, h('i', null, '✓'));
@@ -625,11 +632,12 @@ function intro(now, out, where) {
 // The day plan: booked Lightning Lanes and planned shows are fixed, rides fill in around them. Shared by Now (hero) and My day.
 function dayPlanFor(c, now) {
   const myShows = shows.filter(s => sel.has(s.id) && inPark(s));
-  const fixed = [...c.booked.map(r => ({r, t: day.ll[r.id].start, ll: 1})),
-    ...myShows.filter(s => day.showAt[s.id] > now - 30 * MIN).map(s => ({r: s, t: day.showAt[s.id]}))];
+  const timed = Object.entries(day.showAt).filter(([, t]) => t > now - 30 * MIN).map(([id, t]) => ({r: [...shows, ...live].find(a => a.id === id), t}))
+    .filter(x => x.r && sel.has(x.r.id) && inPark(x.r)).map(x => ({...x, kind: shows.includes(x.r) ? 'show' : 'time'}));
+  const fixed = [...c.booked.map(r => ({r, t: day.ll[r.id].start, ll: 1, kind: 'll'})), ...timed];
   const close = hours.date === day.date && Object.keys(hours.m).length ? Math.max(...Object.values(hours.m).map(x => x[1])) : now + 12 * HOUR;
-  const {steps, left} = plan(c.active, fixed, now, close, c.here);
-  return {myShows, fixed, steps, left, noFc: c.active.filter(r => !r.fut.length).length};
+  const {steps, left} = plan(c.active.filter(r => !day.showAt[r.id]), fixed, now, close, c.here);
+  return {myShows, fixed, steps, left, noFc: c.active.filter(r => !r.fut.length && !day.showAt[r.id]).length};
 }
 
 function renderNow() {
@@ -670,7 +678,7 @@ function renderNow() {
     const walk = c.here && places[nf.r.id] ? walkMin(c.here, places[nf.r.id]) : null, leave = nf.t - (walk || 0) * MIN;
     out.push(h('div', {class: 'card hero'}, h('div', {class: 'eyebrow'}, 'Next up'), h('div', {class: 'pad'},
       nameEl(nf.r),
-      h('div', {class: 'why'}, dots([nf.ll ? h('span', {class: 'llc'}, `⚡ Lightning Lane at ${clock(nf.t)}`) : `🎭 Show at ${clock(nf.t)}`,
+      h('div', {class: 'why'}, dots([nf.ll ? h('span', {class: 'llc'}, `⚡ Lightning Lane at ${clock(nf.t)}`) : `${ICON[nf.kind]} ${nf.kind === 'show' ? 'Show' : 'Going'} at ${clock(nf.t)}`,
         walk != null && `🚶 ${walk} min walk`])),
       h('div', {class: 'extra'}, leave - now > 5 * MIN ? `Leave by ${clock(leave)} (in ${mins(leave - now)} min). Nothing else fits before it.` : 'Head there now.'),
       places[nf.r.id] && h('div', {class: 'acts'}, btn('📍 Map', showOnMap(nf.r.id), 'primary')))));
@@ -725,7 +733,8 @@ function renderDay() {
   if (dayPlan.length) out.push(h('div', {class: 'card'}, dayPlan.map(x => h('div', {class: 'row'},
     h('div', {class: 'when' + (x.w == null ? ' llc' : '')}, x.w == null ? clock(x.t) : x.t <= now + 5 * MIN ? 'Now' : clock(round5(x.t))),
     h('div', {class: 'main'}, nameEl(x.r), dateOf(x.t) !== parkDay() && h('div', {class: 'meta'}, 'Tomorrow')),
-    h('div', {class: 'meta'}, x.w != null ? (x.walk != null ? `🚶 ${x.walk} · ` : '') + `~${x.w} min` : x.ll ? '⚡ Lightning Lane' : '🎭 Show')))));
+    h('div', {class: 'meta'}, x.w != null ? (x.walk != null ? `🚶 ${x.walk} · ` : '') + `~${x.w} min` : {ll: '⚡ Lightning Lane', show: '🎭 Show', time: '🕐 Set time'}[x.kind]),
+    x.w == null && h('button', {class: 'chk', 'aria-label': 'Remove ' + x.r.name, onclick: () => { x.ll ? delete day.ll[x.r.id] : delete day.showAt[x.r.id]; saveDay(); render(); }}, '✕')))));
   else out.push(h('div', {class: 'note'}, 'Nothing to plan yet: your rides need today’s forecast. Add Lightning Lanes and show times below and they’ll show here.'));
   out.push(h('div', {class: 'note'}, 'Rebuilt every minute from live waits and where you are: each ride’s walk, wait and about 5 minutes to ride. Rides that get much better later wait; must-dos go sooner.'
     + (left > 0 ? ` ${left} of your rides don’t fit before closing.` : '')

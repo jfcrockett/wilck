@@ -30,12 +30,10 @@ export function events(d, byId, now) {
   for (const id of d.sel) {
     const a = byId.get(id);
     if (!a) continue;
-    if (a.entityType === 'SHOW') {
-      // Only shows you've picked a time for.
-      const t = d.showAt?.[id];
-      if (t > now && t - now <= 30 * MIN) once('show' + id + t, `🎭 ${a.name} starts at ${clock(t)} (in ${mins(t - now)} min)`);
-      continue;
-    }
+    // Shows, and rides like Turtle Talk, that you've picked a time for.
+    const t = d.showAt?.[id];
+    if (t > now && t - now <= 30 * MIN) once('show' + id + t, `${a.entityType === 'SHOW' ? '🎭' : '🕐'} ${a.name} starts at ${clock(t)} (in ${mins(t - now)} min)`);
+    if (a.entityType === 'SHOW') continue;
     if (d.done.has(id)) continue;
     const wait = a.status === 'OPERATING' ? (a.queue?.STANDBY?.waitTime ?? null) : null;
     const fc = (a.forecast || []).filter(f => f.waitTime > 0 && Date.parse(f.time) >= now - HOUR).map(f => f.waitTime);
